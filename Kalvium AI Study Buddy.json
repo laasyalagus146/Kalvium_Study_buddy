@@ -1,0 +1,1180 @@
+{
+  "name": "Kalvium AI Study Buddy",
+  "model": "anthropic/claude-sonnet-5",
+  "instructions": "# Kalvium AI Study Buddy\n\nYou are Kalvium AI Study Buddy, a personal academic tutor, notes writer, revision coach and examiner for one Kalvium student. Your goal is that the student truly understands, retains and can apply every learning unit of the modules they study, and prepares confidently for exams. Accuracy and completeness beat volume.\n\n## Source of content (critical honesty rule)\n- You have NO direct connection to the Kalvium portal (app.kalvium.community). Never claim you accessed, retrieved or synced anything from Kalvium.\n- All syllabus content comes from what the student pastes or uploads in chat. That content is stored in the `sb_learning_units` table and becomes the single source of truth.\n- Never invent lessons, units, or content that the student did not provide. If a unit is listed but its content was not supplied, mark it `retrieval_status = MISSING` and say so.\n- Never ask for the student's Kalvium password, OTP, or session cookies, and never store them.\n- Web search may only be used to double-check a fact, formula or code behaviour, or to give an extra example. Label anything that did not come from the student's material as \"(supplementary, not from your Kalvium content)\".\n\n## Identifiers and storage conventions\n- student_id: use `self` unless the student gives another identifier.\n- unit_key: `<subject-slug>|<module-slug>|u<2-digit order>`, e.g. `dbms|module-3|u04`. Slugs are lowercase, spaces replaced by hyphens.\n- part_key (sb_learning_units): `<unit_key>|p<part_no>`. Long unit content is split into parts of about 6,000 characters at paragraph boundaries; part_count is stored on every part.\n- material_key (sb_study_materials): `<unit_key or subject-slug|module-slug>|<material_type>|v<content_version>`. material_type is one of: detailed_notes, short_notes, unit_summary, study_guide, revision_detailed, revision_quick, cheat_sheet, question_bank, mcq_bank.\n- attempt_key (sb_quiz_attempts): `<quiz_id>|<unit order uNN>|q<number>`; quiz_id: `<subject-slug>|<module-slug>|quiz-<YYYYMMDD-HHMM>`.\n- topic_key (sb_topic_performance): `<unit_key>|<topic-slug>`.\n- job_key (sb_jobs): `<subject-slug>|<module-slug>|<task_type>|b<batch_no>`.\n- Because every key starts with subject and module, the get_* tools search their key column with a case-insensitive contains match. Always pass `%` wildcards: `%dbms|module-3|%` returns the whole module, an exact key wrapped in `%` returns that row, and `%` alone returns everything (up to the limit). Filter further (e.g. by classification, status, next_review_date) yourself on the returned rows.\n- Upsert (save_*) tools overwrite every column: always read the existing row first and send the complete row with all columns filled.\n- Dates are YYYY-MM-DD. Today's date comes from the conversation context.\n\n## Statuses\nUse exactly: PENDING, IN_PROGRESS, COMPLETED, FAILED, RETRY_REQUIRED, PARTIALLY_COMPLETED.\n\n## Reliability rules (always)\n1. Read module metadata (units list from sb_learning_units) before generating anything.\n2. Work on learning units in batches of 2 (the student may change the batch size). Never put a whole module into one generation step.\n3. Before generating a unit's material, check sb_study_materials for an existing COMPLETED row with the same material_key; if present, reuse it instead of regenerating.\n4. After each unit's output is produced, save it immediately to sb_study_materials, then update the batch checkpoint in sb_jobs (IN_PROGRESS -> COMPLETED). Only then continue to the next batch.\n5. If a tool call fails with a transient error, retry up to 3 times. Do not retry authentication or permission errors; record them. Record a failed unit as FAILED or RETRY_REQUIRED with last_error and attempt_count, then continue with the remaining units.\n6. For long modules, finish about 2-4 batches per reply, report progress, and tell the student to say \"continue\" to resume from the checkpoint.\n7. Every final report lists completed, failed and pending units/tasks explicitly.\n8. A module is COMPLETED only when every unit has its required materials saved and quality-checked; otherwise PARTIALLY_COMPLETED with the missing items named.\n\n## Quality control before marking anything complete\n- Every unit in the module has content (no unexplained MISSING parts).\n- Explanations match the student's original content; nothing important omitted.\n- Formulas, worked examples and code snippets are checked step by step (trace code mentally; show outputs).\n- Every quiz answer key is verified before presenting the quiz.\n- No duplicated sections across units.\n\n## Google Drive (study files)\n- Files are saved as Markdown text files in the configured Drive folder, named `<Subject> - <Module> - <NN>_<Type>.md`, e.g. `DBMS - Module 3 - 01_Detailed_Notes.md`. Types: 01_Detailed_Notes, 02_Short_Notes, 03_Study_Guide, 04_Cheat_Sheet, 05_Important_Questions, 06_MCQ_Bank, 09_Revision_Plan, 10_Weak_Topic_Report.\n- Before saving, search for a file with the same name; if it exists, add a version suffix like ` (v2)` instead of creating confusing duplicates.\n- After creating a file, search for it to get its webViewLink, store the link in sb_study_materials.drive_file_url, and only then share the link. Never give a link you have not verified.\n- Very long documents: split into numbered files (e.g. `01_Detailed_Notes - Part 1.md`) of at most about 40,000 characters each.\n- PDF export, flashcards and mind-map images are not part of this version; say so if asked and offer Markdown/Mermaid text in chat instead.\n\n## Commands and which skill to use\n- Pasting or uploading lesson content, \"add Module 3 of DBMS\" -> Module Content Intake skill.\n- \"Prepare Module X\", notes, study guide, \"Generate everything\" -> Notes and Study Guide skill, then Revision and Cheat Sheets skill.\n- Revision notes, cheat sheet, last-minute revision -> Revision and Cheat Sheets skill.\n- \"Test my preparation\", \"Generate 50 MCQs\", quizzes, mock exams, grading answers -> Quiz and Exam skill.\n- \"Show my weak topics\", \"Revise my weak topics\", \"Create a smart revision plan\", \"Prepare for my exams\" -> Weak Topics and Smart Revision skill.\n- \"Show my progress\", \"Continue my previous module\", \"Download my study pack\" -> Progress and Resume skill.\n\n## Style\n- Simple, beginner-friendly English. Short paragraphs, headings, bullet points, tables where they help, fenced code blocks for code, Mermaid code blocks for diagrams/flowcharts when useful.\n- Never claim generated questions are guaranteed exam questions.\n- Never mark a topic mastered because notes were opened; only recorded quiz performance changes mastery.\n- Never claim progress that is not recorded in the tables.",
+  "tools": [
+    {
+      "type": "custom",
+      "id": "update_topic_mastery"
+    },
+    {
+      "type": "node",
+      "name": "get_learning_units",
+      "description": "Read stored lesson content parts from sb_learning_units by part_key (contains match). Use %subject|module|% for a whole module or %<part_key>% for one part.",
+      "node": {
+        "nodeType": "n8n-nodes-base.dataTableTool",
+        "nodeTypeVersion": 1.1,
+        "nodeParameters": {
+          "resource": "row",
+          "operation": "get",
+          "dataTableId": {
+            "__rl": true,
+            "mode": "id",
+            "value": "9JnbliktXf4Act14",
+            "cachedResultName": "sb_learning_units"
+          },
+          "matchType": "allConditions",
+          "filters": {
+            "conditions": [
+              {
+                "keyName": "part_key",
+                "condition": "ilike",
+                "keyValue": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('part_key_pattern', 'Pattern with % wildcards, e.g. %dbms|module-3|% or %dbms|module-3|u02|p1%', 'string') }}"
+              }
+            ]
+          },
+          "returnAll": false,
+          "limit": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('limit', 'Max rows to return, 1-100', 'number') }}"
+        }
+      }
+    },
+    {
+      "type": "node",
+      "name": "save_learning_unit_part",
+      "description": "Insert or update one lesson content part in sb_learning_units, matched on part_key. Send the complete row.",
+      "node": {
+        "nodeType": "n8n-nodes-base.dataTableTool",
+        "nodeTypeVersion": 1.1,
+        "nodeParameters": {
+          "resource": "row",
+          "operation": "upsert",
+          "dataTableId": {
+            "__rl": true,
+            "mode": "id",
+            "value": "9JnbliktXf4Act14",
+            "cachedResultName": "sb_learning_units"
+          },
+          "matchType": "allConditions",
+          "filters": {
+            "conditions": [
+              {
+                "keyName": "part_key",
+                "condition": "eq",
+                "keyValue": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('part_key', 'Unique part key: <unit_key>|p<part_no>', 'string') }}"
+              }
+            ]
+          },
+          "columns": {
+            "mappingMode": "defineBelow",
+            "value": {
+              "part_key": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('part_key', 'Unique part key: <unit_key>|p<part_no>', 'string') }}",
+              "unit_key": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('unit_key', 'subject|module|uNN', 'string') }}",
+              "subject": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('subject', 'Subject name', 'string') }}",
+              "module": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('module', 'Module name', 'string') }}",
+              "unit_order": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('unit_order', 'Order of the unit inside the module, starting at 1', 'number') }}",
+              "unit_title": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('unit_title', 'Learning unit title', 'string') }}",
+              "part_no": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('part_no', 'Part number of this unit, starting at 1', 'number') }}",
+              "part_count": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('part_count', 'Total parts for this unit', 'number') }}",
+              "content": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('content', 'Verbatim lesson text for this part (about 6000 chars max)', 'string') }}",
+              "source": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('source', 'Where the content came from, e.g. pasted in chat, uploaded file name, or URL the student gave', 'string') }}",
+              "content_version": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('content_version', 'Content version, 1 for first import, +1 when the student replaces the content', 'number') }}",
+              "retrieval_status": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('retrieval_status', 'COMPLETED, MISSING, PARTIALLY_COMPLETED or FAILED', 'string') }}",
+              "notes_status": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('notes_status', 'PENDING, IN_PROGRESS, COMPLETED, FAILED, RETRY_REQUIRED or PARTIALLY_COMPLETED', 'string') }}",
+              "student_id": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('student_id', 'Student identifier, default self', 'string') }}"
+            },
+            "matchingColumns": [
+              "part_key"
+            ],
+            "schema": [
+              {
+                "id": "part_key",
+                "displayName": "part_key",
+                "required": false,
+                "defaultMatch": false,
+                "display": true,
+                "type": "string",
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "unit_key",
+                "displayName": "unit_key",
+                "required": false,
+                "defaultMatch": false,
+                "display": true,
+                "type": "string",
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "subject",
+                "displayName": "subject",
+                "required": false,
+                "defaultMatch": false,
+                "display": true,
+                "type": "string",
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "module",
+                "displayName": "module",
+                "required": false,
+                "defaultMatch": false,
+                "display": true,
+                "type": "string",
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "unit_order",
+                "displayName": "unit_order",
+                "required": false,
+                "defaultMatch": false,
+                "display": true,
+                "type": "number",
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "unit_title",
+                "displayName": "unit_title",
+                "required": false,
+                "defaultMatch": false,
+                "display": true,
+                "type": "string",
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "part_no",
+                "displayName": "part_no",
+                "required": false,
+                "defaultMatch": false,
+                "display": true,
+                "type": "number",
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "part_count",
+                "displayName": "part_count",
+                "required": false,
+                "defaultMatch": false,
+                "display": true,
+                "type": "number",
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "content",
+                "displayName": "content",
+                "required": false,
+                "defaultMatch": false,
+                "display": true,
+                "type": "string",
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "source",
+                "displayName": "source",
+                "required": false,
+                "defaultMatch": false,
+                "display": true,
+                "type": "string",
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "content_version",
+                "displayName": "content_version",
+                "required": false,
+                "defaultMatch": false,
+                "display": true,
+                "type": "number",
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "retrieval_status",
+                "displayName": "retrieval_status",
+                "required": false,
+                "defaultMatch": false,
+                "display": true,
+                "type": "string",
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "notes_status",
+                "displayName": "notes_status",
+                "required": false,
+                "defaultMatch": false,
+                "display": true,
+                "type": "string",
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "student_id",
+                "displayName": "student_id",
+                "required": false,
+                "defaultMatch": false,
+                "display": true,
+                "type": "string",
+                "canBeUsedToMatch": true
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "node",
+      "name": "get_study_materials",
+      "description": "Read generated study materials from sb_study_materials by material_key (contains match). Use %<material_key>% to check for an existing result or %subject|module|% for a whole module.",
+      "node": {
+        "nodeType": "n8n-nodes-base.dataTableTool",
+        "nodeTypeVersion": 1.1,
+        "nodeParameters": {
+          "resource": "row",
+          "operation": "get",
+          "dataTableId": {
+            "__rl": true,
+            "mode": "id",
+            "value": "sas01omOLKQ1vyuj",
+            "cachedResultName": "sb_study_materials"
+          },
+          "matchType": "allConditions",
+          "filters": {
+            "conditions": [
+              {
+                "keyName": "material_key",
+                "condition": "ilike",
+                "keyValue": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('material_key_pattern', 'Pattern with % wildcards, e.g. %dbms|module-3|% or %dbms|module-3|u01|detailed_notes|v1%', 'string') }}"
+              }
+            ]
+          },
+          "returnAll": false,
+          "limit": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('limit', 'Max rows to return, 1-100', 'number') }}"
+        }
+      }
+    },
+    {
+      "type": "node",
+      "name": "save_study_material",
+      "description": "Insert or update one generated study material in sb_study_materials, matched on material_key. Send the complete row.",
+      "node": {
+        "nodeType": "n8n-nodes-base.dataTableTool",
+        "nodeTypeVersion": 1.1,
+        "nodeParameters": {
+          "resource": "row",
+          "operation": "upsert",
+          "dataTableId": {
+            "__rl": true,
+            "mode": "id",
+            "value": "sas01omOLKQ1vyuj",
+            "cachedResultName": "sb_study_materials"
+          },
+          "matchType": "allConditions",
+          "filters": {
+            "conditions": [
+              {
+                "keyName": "material_key",
+                "condition": "eq",
+                "keyValue": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('material_key', 'Unique key: <unit_key or subject|module>|<material_type>|v<version>', 'string') }}"
+              }
+            ]
+          },
+          "columns": {
+            "mappingMode": "defineBelow",
+            "value": {
+              "material_key": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('material_key', 'Unique key: <unit_key or subject|module>|<material_type>|v<version>', 'string') }}",
+              "subject": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('subject', 'Subject name', 'string') }}",
+              "module": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('module', 'Module name', 'string') }}",
+              "unit_key": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('unit_key', 'Unit key, or subject|module for module-level materials', 'string') }}",
+              "material_type": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('material_type', 'detailed_notes, short_notes, unit_summary, study_guide, revision_detailed, revision_quick, cheat_sheet, question_bank or mcq_bank', 'string') }}",
+              "content": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('content', 'Full Markdown content of the material', 'string') }}",
+              "content_version": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('content_version', 'Content version of the source unit used', 'number') }}",
+              "status": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('status', 'PENDING, IN_PROGRESS, COMPLETED, FAILED, RETRY_REQUIRED or PARTIALLY_COMPLETED', 'string') }}",
+              "drive_file_url": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('drive_file_url', 'Verified Google Drive link, or empty string if not exported', 'string') }}",
+              "last_error": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('last_error', 'Last error message, or empty string', 'string') }}",
+              "student_id": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('student_id', 'Student identifier, default self', 'string') }}"
+            },
+            "matchingColumns": [
+              "material_key"
+            ],
+            "schema": [
+              {
+                "id": "material_key",
+                "displayName": "material_key",
+                "required": false,
+                "defaultMatch": false,
+                "display": true,
+                "type": "string",
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "subject",
+                "displayName": "subject",
+                "required": false,
+                "defaultMatch": false,
+                "display": true,
+                "type": "string",
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "module",
+                "displayName": "module",
+                "required": false,
+                "defaultMatch": false,
+                "display": true,
+                "type": "string",
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "unit_key",
+                "displayName": "unit_key",
+                "required": false,
+                "defaultMatch": false,
+                "display": true,
+                "type": "string",
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "material_type",
+                "displayName": "material_type",
+                "required": false,
+                "defaultMatch": false,
+                "display": true,
+                "type": "string",
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "content",
+                "displayName": "content",
+                "required": false,
+                "defaultMatch": false,
+                "display": true,
+                "type": "string",
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "content_version",
+                "displayName": "content_version",
+                "required": false,
+                "defaultMatch": false,
+                "display": true,
+                "type": "number",
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "status",
+                "displayName": "status",
+                "required": false,
+                "defaultMatch": false,
+                "display": true,
+                "type": "string",
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "drive_file_url",
+                "displayName": "drive_file_url",
+                "required": false,
+                "defaultMatch": false,
+                "display": true,
+                "type": "string",
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "last_error",
+                "displayName": "last_error",
+                "required": false,
+                "defaultMatch": false,
+                "display": true,
+                "type": "string",
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "student_id",
+                "displayName": "student_id",
+                "required": false,
+                "defaultMatch": false,
+                "display": true,
+                "type": "string",
+                "canBeUsedToMatch": true
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "node",
+      "name": "get_quiz_attempts",
+      "description": "Read recorded quiz answers from sb_quiz_attempts by attempt_key (contains match). Use %subject|module|% for a module, %<quiz_id>% for one quiz, or %subject|module|quiz-%|u03|% style patterns for a unit.",
+      "node": {
+        "nodeType": "n8n-nodes-base.dataTableTool",
+        "nodeTypeVersion": 1.1,
+        "nodeParameters": {
+          "resource": "row",
+          "operation": "get",
+          "dataTableId": {
+            "__rl": true,
+            "mode": "id",
+            "value": "R8jgnHmDoUEj6bHS",
+            "cachedResultName": "sb_quiz_attempts"
+          },
+          "matchType": "allConditions",
+          "filters": {
+            "conditions": [
+              {
+                "keyName": "attempt_key",
+                "condition": "ilike",
+                "keyValue": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('attempt_key_pattern', 'Pattern with % wildcards, e.g. %dbms|module-3|%', 'string') }}"
+              }
+            ]
+          },
+          "returnAll": false,
+          "limit": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('limit', 'Max rows to return, 1-100', 'number') }}"
+        }
+      }
+    },
+    {
+      "type": "node",
+      "name": "save_quiz_attempt",
+      "description": "Record one graded quiz answer in sb_quiz_attempts, matched on attempt_key. Send the complete row.",
+      "node": {
+        "nodeType": "n8n-nodes-base.dataTableTool",
+        "nodeTypeVersion": 1.1,
+        "nodeParameters": {
+          "resource": "row",
+          "operation": "upsert",
+          "dataTableId": {
+            "__rl": true,
+            "mode": "id",
+            "value": "R8jgnHmDoUEj6bHS",
+            "cachedResultName": "sb_quiz_attempts"
+          },
+          "matchType": "allConditions",
+          "filters": {
+            "conditions": [
+              {
+                "keyName": "attempt_key",
+                "condition": "eq",
+                "keyValue": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('attempt_key', 'Unique key: <quiz_id>|uNN|q<number>', 'string') }}"
+              }
+            ]
+          },
+          "columns": {
+            "mappingMode": "defineBelow",
+            "value": {
+              "attempt_key": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('attempt_key', 'Unique key: <quiz_id>|uNN|q<number>', 'string') }}",
+              "quiz_id": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('quiz_id', 'Quiz identifier', 'string') }}",
+              "subject": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('subject', 'Subject name', 'string') }}",
+              "module": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('module', 'Module name', 'string') }}",
+              "unit_key": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('unit_key', 'Unit key the question tests', 'string') }}",
+              "topic": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('topic', 'Specific concept tested, e.g. Second Normal Form', 'string') }}",
+              "question": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('question', 'Full question text including options', 'string') }}",
+              "question_type": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('question_type', 'mcq, multi_select, true_false, fill_blank, short_answer, long_answer, scenario, programming, output_prediction, debugging or math', 'string') }}",
+              "difficulty": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('difficulty', 'easy, medium or hard', 'string') }}",
+              "student_answer": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('student_answer', 'The student answer exactly as given', 'string') }}",
+              "correct_answer": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('correct_answer', 'Correct answer or marking key', 'string') }}",
+              "is_correct": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('is_correct', 'True only if full marks were awarded', 'boolean') }}",
+              "marks_awarded": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('marks_awarded', 'Marks awarded', 'number') }}",
+              "marks_total": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('marks_total', 'Maximum marks for the question', 'number') }}",
+              "attempted_on": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('attempted_on', 'Date answered, YYYY-MM-DD', 'string') }}",
+              "student_id": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('student_id', 'Student identifier, default self', 'string') }}"
+            },
+            "matchingColumns": [
+              "attempt_key"
+            ],
+            "schema": [
+              {
+                "id": "attempt_key",
+                "displayName": "attempt_key",
+                "required": false,
+                "defaultMatch": false,
+                "display": true,
+                "type": "string",
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "quiz_id",
+                "displayName": "quiz_id",
+                "required": false,
+                "defaultMatch": false,
+                "display": true,
+                "type": "string",
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "subject",
+                "displayName": "subject",
+                "required": false,
+                "defaultMatch": false,
+                "display": true,
+                "type": "string",
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "module",
+                "displayName": "module",
+                "required": false,
+                "defaultMatch": false,
+                "display": true,
+                "type": "string",
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "unit_key",
+                "displayName": "unit_key",
+                "required": false,
+                "defaultMatch": false,
+                "display": true,
+                "type": "string",
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "topic",
+                "displayName": "topic",
+                "required": false,
+                "defaultMatch": false,
+                "display": true,
+                "type": "string",
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "question",
+                "displayName": "question",
+                "required": false,
+                "defaultMatch": false,
+                "display": true,
+                "type": "string",
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "question_type",
+                "displayName": "question_type",
+                "required": false,
+                "defaultMatch": false,
+                "display": true,
+                "type": "string",
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "difficulty",
+                "displayName": "difficulty",
+                "required": false,
+                "defaultMatch": false,
+                "display": true,
+                "type": "string",
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "student_answer",
+                "displayName": "student_answer",
+                "required": false,
+                "defaultMatch": false,
+                "display": true,
+                "type": "string",
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "correct_answer",
+                "displayName": "correct_answer",
+                "required": false,
+                "defaultMatch": false,
+                "display": true,
+                "type": "string",
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "is_correct",
+                "displayName": "is_correct",
+                "required": false,
+                "defaultMatch": false,
+                "display": true,
+                "type": "boolean",
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "marks_awarded",
+                "displayName": "marks_awarded",
+                "required": false,
+                "defaultMatch": false,
+                "display": true,
+                "type": "number",
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "marks_total",
+                "displayName": "marks_total",
+                "required": false,
+                "defaultMatch": false,
+                "display": true,
+                "type": "number",
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "attempted_on",
+                "displayName": "attempted_on",
+                "required": false,
+                "defaultMatch": false,
+                "display": true,
+                "type": "dateTime",
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "student_id",
+                "displayName": "student_id",
+                "required": false,
+                "defaultMatch": false,
+                "display": true,
+                "type": "string",
+                "canBeUsedToMatch": true
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "node",
+      "name": "get_topic_performance",
+      "description": "Read topic performance and revision schedule rows from sb_topic_performance by topic_key (contains match). Use %subject|module|% for a module or % for all topics; then filter by classification or next_review_date yourself.",
+      "node": {
+        "nodeType": "n8n-nodes-base.dataTableTool",
+        "nodeTypeVersion": 1.1,
+        "nodeParameters": {
+          "resource": "row",
+          "operation": "get",
+          "dataTableId": {
+            "__rl": true,
+            "mode": "id",
+            "value": "zawmPdzv6FbEV1LL",
+            "cachedResultName": "sb_topic_performance"
+          },
+          "matchType": "allConditions",
+          "filters": {
+            "conditions": [
+              {
+                "keyName": "topic_key",
+                "condition": "ilike",
+                "keyValue": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('topic_key_pattern', 'Pattern with % wildcards, e.g. %dbms|module-3|% or %', 'string') }}"
+              }
+            ]
+          },
+          "returnAll": false,
+          "limit": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('limit', 'Max rows to return, 1-100', 'number') }}"
+        }
+      }
+    },
+    {
+      "type": "node",
+      "name": "save_topic_performance",
+      "description": "Insert or update one topic's performance and next revision in sb_topic_performance, matched on topic_key. Use values returned by update_topic_mastery. Send the complete row.",
+      "node": {
+        "nodeType": "n8n-nodes-base.dataTableTool",
+        "nodeTypeVersion": 1.1,
+        "nodeParameters": {
+          "resource": "row",
+          "operation": "upsert",
+          "dataTableId": {
+            "__rl": true,
+            "mode": "id",
+            "value": "zawmPdzv6FbEV1LL",
+            "cachedResultName": "sb_topic_performance"
+          },
+          "matchType": "allConditions",
+          "filters": {
+            "conditions": [
+              {
+                "keyName": "topic_key",
+                "condition": "eq",
+                "keyValue": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('topic_key', 'Unique key: <unit_key>|<topic-slug>', 'string') }}"
+              }
+            ]
+          },
+          "columns": {
+            "mappingMode": "defineBelow",
+            "value": {
+              "topic_key": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('topic_key', 'Unique key: <unit_key>|<topic-slug>', 'string') }}",
+              "subject": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('subject', 'Subject name', 'string') }}",
+              "module": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('module', 'Module name', 'string') }}",
+              "unit_key": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('unit_key', 'Unit key', 'string') }}",
+              "topic": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('topic', 'Topic name', 'string') }}",
+              "attempted": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('attempted', 'Total questions attempted', 'number') }}",
+              "correct": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('correct', 'Total correct', 'number') }}",
+              "incorrect": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('incorrect', 'Total incorrect', 'number') }}",
+              "accuracy": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('accuracy', 'Accuracy percentage', 'number') }}",
+              "previous_accuracy": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('previous_accuracy', 'Accuracy before this session, 0 if none', 'number') }}",
+              "classification": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('classification', 'Strong, Moderate, Weak or Not assessed', 'string') }}",
+              "repeated_mistakes": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('repeated_mistakes', 'Total repeated mistakes', 'number') }}",
+              "last_practiced": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('last_practiced', 'Last practice date YYYY-MM-DD', 'string') }}",
+              "review_stage": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('review_stage', 'Spaced repetition stage 0-6', 'number') }}",
+              "next_review_date": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('next_review_date', 'Next review date YYYY-MM-DD', 'string') }}",
+              "revision_status": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('revision_status', 'NEW, SCHEDULED, FOCUSED_REVISION or COMPLETED', 'string') }}",
+              "student_id": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('student_id', 'Student identifier, default self', 'string') }}"
+            },
+            "matchingColumns": [
+              "topic_key"
+            ],
+            "schema": [
+              {
+                "id": "topic_key",
+                "displayName": "topic_key",
+                "required": false,
+                "defaultMatch": false,
+                "display": true,
+                "type": "string",
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "subject",
+                "displayName": "subject",
+                "required": false,
+                "defaultMatch": false,
+                "display": true,
+                "type": "string",
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "module",
+                "displayName": "module",
+                "required": false,
+                "defaultMatch": false,
+                "display": true,
+                "type": "string",
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "unit_key",
+                "displayName": "unit_key",
+                "required": false,
+                "defaultMatch": false,
+                "display": true,
+                "type": "string",
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "topic",
+                "displayName": "topic",
+                "required": false,
+                "defaultMatch": false,
+                "display": true,
+                "type": "string",
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "attempted",
+                "displayName": "attempted",
+                "required": false,
+                "defaultMatch": false,
+                "display": true,
+                "type": "number",
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "correct",
+                "displayName": "correct",
+                "required": false,
+                "defaultMatch": false,
+                "display": true,
+                "type": "number",
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "incorrect",
+                "displayName": "incorrect",
+                "required": false,
+                "defaultMatch": false,
+                "display": true,
+                "type": "number",
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "accuracy",
+                "displayName": "accuracy",
+                "required": false,
+                "defaultMatch": false,
+                "display": true,
+                "type": "number",
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "previous_accuracy",
+                "displayName": "previous_accuracy",
+                "required": false,
+                "defaultMatch": false,
+                "display": true,
+                "type": "number",
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "classification",
+                "displayName": "classification",
+                "required": false,
+                "defaultMatch": false,
+                "display": true,
+                "type": "string",
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "repeated_mistakes",
+                "displayName": "repeated_mistakes",
+                "required": false,
+                "defaultMatch": false,
+                "display": true,
+                "type": "number",
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "last_practiced",
+                "displayName": "last_practiced",
+                "required": false,
+                "defaultMatch": false,
+                "display": true,
+                "type": "dateTime",
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "review_stage",
+                "displayName": "review_stage",
+                "required": false,
+                "defaultMatch": false,
+                "display": true,
+                "type": "number",
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "next_review_date",
+                "displayName": "next_review_date",
+                "required": false,
+                "defaultMatch": false,
+                "display": true,
+                "type": "dateTime",
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "revision_status",
+                "displayName": "revision_status",
+                "required": false,
+                "defaultMatch": false,
+                "display": true,
+                "type": "string",
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "student_id",
+                "displayName": "student_id",
+                "required": false,
+                "defaultMatch": false,
+                "display": true,
+                "type": "string",
+                "canBeUsedToMatch": true
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "node",
+      "name": "get_job_checkpoints",
+      "description": "Read batch checkpoints from sb_jobs by job_key (contains match). Use %subject|module|% to resume a module or % for all jobs.",
+      "node": {
+        "nodeType": "n8n-nodes-base.dataTableTool",
+        "nodeTypeVersion": 1.1,
+        "nodeParameters": {
+          "resource": "row",
+          "operation": "get",
+          "dataTableId": {
+            "__rl": true,
+            "mode": "id",
+            "value": "D9vL7vQPrNbuVIP0",
+            "cachedResultName": "sb_jobs"
+          },
+          "matchType": "allConditions",
+          "filters": {
+            "conditions": [
+              {
+                "keyName": "job_key",
+                "condition": "ilike",
+                "keyValue": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('job_key_pattern', 'Pattern with % wildcards, e.g. %dbms|module-3|%', 'string') }}"
+              }
+            ]
+          },
+          "returnAll": false,
+          "limit": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('limit', 'Max rows to return, 1-100', 'number') }}"
+        }
+      }
+    },
+    {
+      "type": "node",
+      "name": "save_job_checkpoint",
+      "description": "Insert or update one batch checkpoint in sb_jobs, matched on job_key. Send the complete row.",
+      "node": {
+        "nodeType": "n8n-nodes-base.dataTableTool",
+        "nodeTypeVersion": 1.1,
+        "nodeParameters": {
+          "resource": "row",
+          "operation": "upsert",
+          "dataTableId": {
+            "__rl": true,
+            "mode": "id",
+            "value": "D9vL7vQPrNbuVIP0",
+            "cachedResultName": "sb_jobs"
+          },
+          "matchType": "allConditions",
+          "filters": {
+            "conditions": [
+              {
+                "keyName": "job_key",
+                "condition": "eq",
+                "keyValue": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('job_key', 'Unique key: <subject>|<module>|<task_type>|b<batch_no>', 'string') }}"
+              }
+            ]
+          },
+          "columns": {
+            "mappingMode": "defineBelow",
+            "value": {
+              "job_key": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('job_key', 'Unique key: <subject>|<module>|<task_type>|b<batch_no>', 'string') }}",
+              "subject": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('subject', 'Subject name', 'string') }}",
+              "module": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('module', 'Module name', 'string') }}",
+              "unit_key": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('unit_key', 'Comma-separated unit keys in this batch', 'string') }}",
+              "task_type": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('task_type', 'intake, notes, study_guide, revision, quiz_bank or export', 'string') }}",
+              "batch_no": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('batch_no', 'Batch number starting at 1', 'number') }}",
+              "status": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('status', 'PENDING, IN_PROGRESS, COMPLETED, FAILED, RETRY_REQUIRED or PARTIALLY_COMPLETED', 'string') }}",
+              "attempt_count": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('attempt_count', 'Number of attempts so far', 'number') }}",
+              "last_error": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('last_error', 'Last error message, or empty string', 'string') }}",
+              "updated_on": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('updated_on', 'Date YYYY-MM-DD', 'string') }}",
+              "student_id": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('student_id', 'Student identifier, default self', 'string') }}"
+            },
+            "matchingColumns": [
+              "job_key"
+            ],
+            "schema": [
+              {
+                "id": "job_key",
+                "displayName": "job_key",
+                "required": false,
+                "defaultMatch": false,
+                "display": true,
+                "type": "string",
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "subject",
+                "displayName": "subject",
+                "required": false,
+                "defaultMatch": false,
+                "display": true,
+                "type": "string",
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "module",
+                "displayName": "module",
+                "required": false,
+                "defaultMatch": false,
+                "display": true,
+                "type": "string",
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "unit_key",
+                "displayName": "unit_key",
+                "required": false,
+                "defaultMatch": false,
+                "display": true,
+                "type": "string",
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "task_type",
+                "displayName": "task_type",
+                "required": false,
+                "defaultMatch": false,
+                "display": true,
+                "type": "string",
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "batch_no",
+                "displayName": "batch_no",
+                "required": false,
+                "defaultMatch": false,
+                "display": true,
+                "type": "number",
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "status",
+                "displayName": "status",
+                "required": false,
+                "defaultMatch": false,
+                "display": true,
+                "type": "string",
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "attempt_count",
+                "displayName": "attempt_count",
+                "required": false,
+                "defaultMatch": false,
+                "display": true,
+                "type": "number",
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "last_error",
+                "displayName": "last_error",
+                "required": false,
+                "defaultMatch": false,
+                "display": true,
+                "type": "string",
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "updated_on",
+                "displayName": "updated_on",
+                "required": false,
+                "defaultMatch": false,
+                "display": true,
+                "type": "dateTime",
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "student_id",
+                "displayName": "student_id",
+                "required": false,
+                "defaultMatch": false,
+                "display": true,
+                "type": "string",
+                "canBeUsedToMatch": true
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "node",
+      "name": "drive_search",
+      "description": "Search the student's Google Drive for files by (partial) name. Returns id, name, mimeType and webViewLink. Use it to check for an existing file before saving and to get the link of a file you just created.",
+      "node": {
+        "nodeType": "n8n-nodes-base.googleDriveTool",
+        "nodeTypeVersion": 3,
+        "nodeParameters": {
+          "resource": "fileFolder",
+          "operation": "search",
+          "authentication": "oAuth2",
+          "searchMethod": "name",
+          "queryString": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('name_query', 'File name or part of it', 'string') }}",
+          "returnAll": false,
+          "limit": 20,
+          "filter": {
+            "whatToSearch": "files"
+          },
+          "options": {
+            "fields": [
+              "id",
+              "name",
+              "mimeType",
+              "webViewLink"
+            ]
+          }
+        },
+        "credentials": {
+          "googleDriveOAuth2Api": {
+            "id": "Glr8Q2ryipd1wG94",
+            "name": "Google Drive account"
+          }
+        }
+      }
+    },
+    {
+      "type": "node",
+      "name": "drive_save_text_file",
+      "description": "Save a Markdown study file to the student's Google Drive Study Buddy folder. Returns the new file id; then use drive_search to get its webViewLink.",
+      "node": {
+        "nodeType": "n8n-nodes-base.googleDriveTool",
+        "nodeTypeVersion": 3,
+        "nodeParameters": {
+          "resource": "file",
+          "operation": "createFromText",
+          "authentication": "oAuth2",
+          "name": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('file_name', 'File name, e.g. DBMS - Module 3 - 01_Detailed_Notes.md', 'string') }}",
+          "content": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('file_content', 'Full Markdown content of the file', 'string') }}",
+          "driveId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "My Drive"
+          },
+          "folderId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "root",
+            "cachedResultName": "/ (Root folder)"
+          },
+          "options": {}
+        },
+        "credentials": {
+          "googleDriveOAuth2Api": {
+            "id": "Glr8Q2ryipd1wG94",
+            "name": "Google Drive account"
+          }
+        }
+      }
+    }
+  ],
+  "personalisation": {
+    "icon": "bot",
+    "gradient": {
+      "from": "#4A95FF",
+      "to": "#DD9C00",
+      "angle": 282,
+      "fromStop": 15,
+      "toStop": 98
+    }
+  },
+  "credential": "__AI_GATEWAY_MANAGED__",
+  "description": "Personal academic assistant for a Kalvium student: turns pasted or uploaded module content into notes, revision sheets and quizzes, tracks weak topics and plans spaced revision.",
+  "memory": {
+    "enabled": true,
+    "storage": "n8n",
+    "observationalMemory": {
+      "enabled": true
+    }
+  },
+  "providerTools": {
+    "anthropic.web_search": {
+      "maxUses": 5
+    }
+  },
+  "config": {
+    "promptCaching": {
+      "enabled": true
+    },
+    "webSearch": {
+      "enabled": true,
+      "provider": "native"
+    }
+  },
+  "skills": [
+    {
+      "type": "skill",
+      "id": "skill_ZPwstuJ2X73UrrCG"
+    },
+    {
+      "type": "skill",
+      "id": "skill_PXPZgpa62esE32Ru"
+    },
+    {
+      "type": "skill",
+      "id": "skill_tAoi8qkWK2uSoYr2"
+    },
+    {
+      "type": "skill",
+      "id": "skill_5CthRNlU8HHcSGzb"
+    },
+    {
+      "type": "skill",
+      "id": "skill_1tLosPkJx1EBP7sc"
+    },
+    {
+      "type": "skill",
+      "id": "skill_A6zscAVJX5tlFqTK"
+    }
+  ],
+  "integrations": []
+}
